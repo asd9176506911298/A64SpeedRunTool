@@ -14,12 +14,12 @@ namespace a64SpeedRunTool
 {
     internal class SpeedRunTool : MonoBehaviour
     {
-        // 傳送點資訊
+        // Teleport save data
         private Vector3 savedPosition;
         private Quaternion savedRotation;
         private bool hasSavedPosition = false;
 
-        // 特徵碼掃描資訊
+        // Signature scan data
         private IntPtr typeInfoPtrAddr = IntPtr.Zero;
         private IntPtr skipFlagAddr = IntPtr.Zero;
         private float autoSkipTimer = 0f;
@@ -28,7 +28,7 @@ namespace a64SpeedRunTool
         private float enemyScanTimer = 0f;
         private const float EnemyScanInterval = 0.3f;
 
-        // === 新增：NoClip / Jump 相關 ===
+        // NoClip / Jump settings
         public KeyCode noClipToggleKey = KeyCode.V;
         public float noClipSpeed = 12f;
         public float noClipFastMultiplier = 3f;
@@ -37,13 +37,25 @@ namespace a64SpeedRunTool
         private bool cachedCapsulePrevEnabled = true;
         private Transform cachedCamTransform;
 
-        // 場景裡實際用來看畫面的第一人稱攝影機物件名稱。
-        // 因為這個場景同時存在多台叫 "Main Camera" 的攝影機，Camera.main 常常抓錯，
-        // 所以改成直接用名字鎖定真正的那一台。如果你的遊戲換了場景名稱不一樣，改這裡就好。
+        // Name of the actual first-person camera object used for rendering.
+        // This scene has multiple objects named "Main Camera", so Camera.main
+        // often grabs the wrong one. Look it up by name instead. If your game
+        // uses a different camera name in another scene, change this field.
         public string fpsCameraObjectName = "CameraFPS(Clone)";
 
         public KeyCode jumpKey = KeyCode.Space;
         public float jumpForce = 8f;
+
+        // Game speed control
+        public KeyCode speedDownKey = KeyCode.Z;      // Slow down (lower custom scale)
+        public KeyCode speedUpKey = KeyCode.X;        // Speed up (raise custom scale)
+        public KeyCode speedToggleKey = KeyCode.C;    // Toggle: normal speed <-> custom scale
+        public float speedStep = 0.1f;                // Amount changed per Z/X press
+        public float minTimeScale = 0.05f;
+        public float maxTimeScale = 3f;
+        private float customTimeScale = 1f;           // Your target custom scale
+        private bool usingCustomSpeed = false;
+        private float defaultFixedDeltaTime = 0.02f;  // Original physics update interval
 
         // Windows API
         [DllImport("kernel32.dll")]
@@ -60,6 +72,7 @@ namespace a64SpeedRunTool
         {
             GameObject.DontDestroyOnLoad(this.gameObject);
             Plugin.Log.LogInfo("[SpeedRunTool] Awake: Initializing Scanner...");
+            defaultFixedDeltaTime = Time.fixedDeltaTime; // Cache original physics step so we can restore it later
             FindTypeInfoAddressOnce();
         }
 
@@ -96,7 +109,7 @@ namespace a64SpeedRunTool
                 }
             }
 
-            // === 新增：NoClip 切換與移動 ===
+            // NoClip toggle and movement
             if (Input.GetKeyDown(noClipToggleKey))
             {
                 ToggleNoClip();
@@ -106,10 +119,32 @@ namespace a64SpeedRunTool
                 HandleNoClipMovement();
             }
 
-            // === 新增：跳躍（實驗性，見上方說明）===
+            // Jump (experimental, see notes below)
             if (Input.GetKeyDown(jumpKey))
             {
                 TryForceJump();
+            }
+
+            // Game speed control (Z slow down / X speed up / C toggle normal vs custom speed)
+            if (Input.GetKeyDown(speedDownKey))
+            {
+                customTimeScale = Mathf.Clamp(customTimeScale - speedStep, minTimeScale, maxTimeScale);
+                Plugin.Log.LogInfo($"[Speed] Custom scale -> {customTimeScale:F2}x");
+                if (usingCustomSpeed) ApplyTimeScale(customTimeScale);
+            }
+            if (Input.GetKeyDown(speedUpKey))
+            {
+                customTimeScale = Mathf.Clamp(customTimeScale + speedStep, minTimeScale, maxTimeScale);
+                Plugin.Log.LogInfo($"[Speed] Custom scale -> {customTimeScale:F2}x");
+                if (usingCustomSpeed) ApplyTimeScale(customTimeScale);
+            }
+            if (Input.GetKeyDown(speedToggleKey))
+            {
+                usingCustomSpeed = !usingCustomSpeed;
+                ApplyTimeScale(usingCustomSpeed ? customTimeScale : 1f);
+                Plugin.Log.LogInfo(usingCustomSpeed
+                    ? $"[Speed] Switched to custom speed: {customTimeScale:F2}x"
+                    : "[Speed] Switched back to normal speed 1.00x");
             }
 
             enemyScanTimer += Time.deltaTime;
@@ -130,7 +165,16 @@ namespace a64SpeedRunTool
             }
         }
 
-        // === 新增：找到玩家身上的 KinematicCharacterMotor（只找一次，快取起來）===
+        // Apply a time scale and keep fixedDeltaTime in sync so slow-mo/fast-forward
+        // doesn't make physics simulation stutter or behave incorrectly.
+        [HideFromIl2Cpp]
+        private void ApplyTimeScale(float scale)
+        {
+            Time.timeScale = scale;
+            Time.fixedDeltaTime = defaultFixedDeltaTime * scale;
+        }
+
+        // Find the player's KinematicCharacterMotor (only searched once, then cached)
         [HideFromIl2Cpp]
         private KinematicCharacterMotor GetPlayerMotor()
         {
@@ -143,14 +187,14 @@ namespace a64SpeedRunTool
             return cachedMotor;
         }
 
-        // === 新增：切換 NoClip ===
+        // Toggle NoClip
         [HideFromIl2Cpp]
         private void ToggleNoClip()
         {
             var motor = GetPlayerMotor();
             if (motor == null)
             {
-                Plugin.Log.LogWarning("[NoClip] 找不到玩家的 KinematicCharacterMotor。");
+                Plugin.Log.LogWarning("[NoClip] Could not find the player's KinematicCharacterMotor.");
                 return;
             }
 
@@ -158,29 +202,31 @@ namespace a64SpeedRunTool
 
             if (noClipActive)
             {
-                // 關閉 KCC 的模擬，讓角色不再受物理/碰撞限制
+                // Disable KCC simulation so the character is no longer bound by physics/collision
                 if (motor.Capsule != null)
                 {
                     cachedCapsulePrevEnabled = motor.Capsule.enabled;
                     motor.Capsule.enabled = false;
                 }
                 motor.enabled = false;
-                Plugin.Log.LogInfo("[NoClip] 已開啟。");
+                Plugin.Log.LogInfo("[NoClip] Enabled.");
             }
             else
             {
-                // 用目前位置重新同步 KCC 的內部狀態，避免恢復瞬間穿模或彈飛
+                // Resync KCC's internal state using the current position, to avoid
+                // clipping or launching the character when leaving NoClip.
                 motor.SetPositionAndRotation(motor.transform.position, motor.transform.rotation, true);
                 if (motor.Capsule != null)
                 {
                     motor.Capsule.enabled = cachedCapsulePrevEnabled;
                 }
                 motor.enabled = true;
-                Plugin.Log.LogInfo("[NoClip] 已關閉，狀態已同步。");
+                Plugin.Log.LogInfo("[NoClip] Disabled, motor resynced.");
             }
         }
 
-        // === 新增：找到真正的第一人稱攝影機（不用 Camera.main，因為場景有多台同名攝影機）===
+        // Find the real first-person camera (not Camera.main, since this scene has
+        // multiple identically-named cameras)
         [HideFromIl2Cpp]
         private Transform GetDirectionReference()
         {
@@ -190,18 +236,20 @@ namespace a64SpeedRunTool
             if (camObj != null)
             {
                 cachedCamTransform = camObj.transform;
-                Plugin.Log.LogInfo($"[NoClip] 已鎖定方向參考攝影機: {fpsCameraObjectName}");
+                Plugin.Log.LogInfo($"[NoClip] Locked direction reference camera: {fpsCameraObjectName}");
                 return cachedCamTransform;
             }
 
-            Plugin.Log.LogWarning($"[NoClip] 找不到名為 \"{fpsCameraObjectName}\" 的物件，退回用角色本身方向。");
+            Plugin.Log.LogWarning($"[NoClip] Could not find an object named \"{fpsCameraObjectName}\", falling back to the character's own orientation.");
             return cachedMotor != null ? cachedMotor.transform : null;
         }
 
-        // === 新增：NoClip 模式下的自由飛行移動 ===
-        // 用實際鎖定的第一人稱攝影機的完整方向（含俯仰角），符合 Noclip 飛行「看哪飛哪」的直覺，
-        // 不攤平。上下另外用 E/Q 控制，跟看的角度無關。
-        // 移動時透過 motor.SetPositionAndRotation() 寫入，讓 KCC 內部追蹤的座標跟 transform 保持同步。
+        // Free-fly movement while NoClip is active.
+        // Uses the locked first-person camera's full direction (including pitch),
+        // matching the usual "fly where you look" NoClip feel. Not flattened.
+        // Vertical movement is handled separately via E/Q, independent of look angle.
+        // Movement is written through motor.SetPositionAndRotation() so KCC's
+        // internally tracked coordinates stay in sync with the transform.
         [HideFromIl2Cpp]
         private void HandleNoClipMovement()
         {
@@ -211,8 +259,10 @@ namespace a64SpeedRunTool
             Transform refT = GetDirectionReference();
             if (refT == null) return;
 
-            // 這款遊戲用 Rewired 做輸入，Input Manager 的 Horizontal/Vertical 軸設定不可靠
-            // （這就是之前 W/A 沒反應、Q 會飄的真正原因），改成直接讀鍵盤按鍵狀態，繞過軸設定。
+            // This game uses Rewired for input, and the Input Manager's
+            // Horizontal/Vertical axis settings are unreliable here (this was the
+            // real cause of W/A not responding and Q drifting). Read raw key
+            // states directly instead, bypassing the axis configuration.
             float h = 0f;
             if (Input.GetKey(KeyCode.D)) h += 1f;
             if (Input.GetKey(KeyCode.A)) h -= 1f;
@@ -229,18 +279,21 @@ namespace a64SpeedRunTool
             float speed = noClipSpeed * (Input.GetKey(KeyCode.LeftShift) ? noClipFastMultiplier : 1f);
             Vector3 newPos = motor.transform.position + move.normalized * speed * Time.deltaTime;
 
-            // 用 KCC 官方 API 搬移，確保 Motor 內部座標跟畫面同步
+            // Move via the official KCC API so the motor's internal coordinates
+            // stay in sync with what's rendered.
             motor.SetPositionAndRotation(newPos, motor.transform.rotation, true);
         }
 
-        // === 新增：嘗試跳躍（實驗性）===
-        // 注意：KCC 角色的速度通常由遊戲自己的 ICharacterController.UpdateVelocity()
-        // 每個 FixedUpdate 重新計算，這裡直接寫 BaseVelocity 可能會在下一幀被蓋掉。
-        // 若沒有效果，需要用 Harmony 對遊戲角色控制器的 UpdateVelocity 做 Postfix 補丁才能穩定生效。
+        // Attempt to jump (experimental).
+        // Note: KCC character velocity is usually recalculated every FixedUpdate by
+        // the game's own ICharacterController.UpdateVelocity(), so writing
+        // BaseVelocity directly here may get overwritten the very next frame.
+        // If this has no visible effect, a Harmony postfix patch on the game's
+        // player controller's UpdateVelocity method is needed for a reliable jump.
         [HideFromIl2Cpp]
         private void TryForceJump()
         {
-            if (noClipActive) return; // NoClip 中不需要跳躍
+            if (noClipActive) return; // No need to jump while in NoClip
             var motor = GetPlayerMotor();
             if (motor == null) return;
 
@@ -305,6 +358,17 @@ namespace a64SpeedRunTool
 
         public void OnGUI()
         {
+            // Persistent on-screen display of the current speed scale
+            var speedStyle = new GUIStyle(GUI.skin.label);
+            speedStyle.fontSize = 16;
+            speedStyle.fontStyle = FontStyle.Bold;
+            speedStyle.normal.textColor = usingCustomSpeed ? Color.cyan : Color.white;
+
+            string speedLabel = usingCustomSpeed
+                ? $"Speed: {customTimeScale:F2}x (Custom)"
+                : $"Speed: 1.00x (Normal)";
+            GUI.Label(new Rect(10, 50, 300, 30), speedLabel, speedStyle);
+
             if (enemyStates.Count == 0) return;
 
             var cam = Camera.main;
