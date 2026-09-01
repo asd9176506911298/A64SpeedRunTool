@@ -60,11 +60,11 @@ namespace a64SpeedRunTool
                 MonitorInitialization();
             }
 
-            // 2. 只要有找到變數地址，每隔 5 秒執行一次 TryApplySkip
+            // 2. 只要有找到變數地址，每隔 0.5 秒執行一次 TryApplySkip
             if (skipFlagAddr != IntPtr.Zero)
             {
                 autoSkipTimer += Time.deltaTime;
-                if (autoSkipTimer >= 5.0f)
+                if (autoSkipTimer >= 0.5f)
                 {
                     TryApplySkip();
                     autoSkipTimer = 0f;
