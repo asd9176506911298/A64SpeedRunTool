@@ -368,18 +368,38 @@ namespace a64SpeedRunTool
         {
             ProcessModule module = Process.GetCurrentProcess().Modules.Cast<ProcessModule>()
                 .FirstOrDefault(m => m.ModuleName.ToLower().Contains("gameassembly"));
-            if (module == null) return;
-
-            string pattern = "48 8B 05 ?? ?? ?? ?? 48 8B 88 ?? ?? ?? ?? C6 01 ?? 4D 85 F6 0F 84 ?? ?? ?? ?? 41 80 7E ?? ?? 74";
-            IntPtr found = SafeFullModuleScan(module.BaseAddress, (long)module.ModuleMemorySize, pattern);
-
-            if (found != IntPtr.Zero)
+            if (module == null)
             {
-                byte* instr = (byte*)found;
-                int ripOffset = *(int*)(instr + 3);
-                typeInfoPtrAddr = (IntPtr)(instr + 7 + ripOffset);
-                Plugin.Log.LogInfo($"[Scanner] Pattern found. Tracking TypeInfo at 0x{typeInfoPtrAddr.ToInt64():X}");
+                Plugin.Log.LogWarning("[Scanner] GameAssembly module not found.");
+                return;
             }
+
+            // 多組候選特徵碼，依序嘗試，直到找到為止。
+            // 不同版本/編譯優化可能導致指令排列不同，所以保留多組備援。
+            string[] patterns = new[]
+            {
+                "48 8B 05 ?? ?? ?? ?? 48 8B 88 ?? ?? ?? ?? C6 01 ?? 4D 85 F6 0F 84 ?? ?? ?? ?? 41 80 7E ?? ?? 74",
+                "48 8B 05 ?? ?? ?? ?? 48 8B 5C 24 ?? 48 8B 88 ?? ?? ?? ?? C6 01 ?? 48 83 C4 ?? 5F C3 E8 ?? ?? ?? ?? CC E8 ?? ?? ?? ?? CC E8 ?? ?? ?? ?? CC E8 ?? ?? ?? ?? CC CC CC 48 89 5C 24 ?? 57 48 83 EC ?? 80 3D ?? ?? ?? ?? ?? 8B DA",
+            };
+
+            for (int i = 0; i < patterns.Length; i++)
+            {
+                IntPtr found = SafeFullModuleScan(module.BaseAddress, (long)module.ModuleMemorySize, patterns[i]);
+                if (found != IntPtr.Zero)
+                {
+                    byte* instr = (byte*)found;
+                    int ripOffset = *(int*)(instr + 3);
+                    typeInfoPtrAddr = (IntPtr)(instr + 7 + ripOffset);
+                    Plugin.Log.LogInfo($"[Scanner] Pattern #{i} matched. Tracking TypeInfo at 0x{typeInfoPtrAddr.ToInt64():X}");
+                    return;
+                }
+                else
+                {
+                    Plugin.Log.LogWarning($"[Scanner] Pattern #{i} not found, trying next...");
+                }
+            }
+
+            Plugin.Log.LogError("[Scanner] All patterns failed. TypeInfo not found.");
         }
 
         [HideFromIl2Cpp]
